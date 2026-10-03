@@ -1,0 +1,29 @@
+# Local configuration, credentials, and runtime state
+.env
+.env.*
+.envrc
+secrets/
+private/
+runtime/
+logs/
+state/
+config.json
+ownership.json
+*activation.json
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+*.lock
+*.key
+*.pem
+*.p12
+
+# Python and editor output
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+.idea/
+.vscode/
+*.zip
