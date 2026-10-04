@@ -11,7 +11,8 @@
 
 ## 当前状态
 
-- 48 项自动化测试通过，覆盖发送结果、并发去重、停用、超时和配置保留。
+- 原 macOS 版本的 48 项自动化测试通过，覆盖发送结果、并发去重、停用、超时和配置保留。加入 Windows 适配后的 macOS 回归仍待实机运行。
+- Windows 的 15 项隔离测试通过，覆盖文件权限、锁、进程清理、回调转发、管理器和 PowerShell Hook 命令。
 - 已验证本地 Codex 结束回调，以及既有本地 Work 聊天通过工具继续回复时的结束回调。
 - 使用已完成事件手动测试发送器，Bark API 接收成功，手机显示的标题和内容正确。
 - 提问 Hook 已在隔离 Codex 0.160.0 中验证。真实桌面自动提问推送和 `alarm` / `calypso` 的手机播放仍待验收；新增 Hook 必须先通过 `/hooks` 信任。
@@ -20,7 +21,7 @@
 
 ## 环境
 
-当前实现面向 macOS，要求 Python 3.9+、已登录且支持 app-server 的 Codex，以及已有 Bark 设备密钥。
+当前源码提供 macOS 和 Windows 本机实现，要求 Python 3.9+、已登录且支持 app-server 的 Codex，以及已有 Bark 设备密钥。Windows 使用 Win32 文件权限、共享锁、Job Object 进程清理和有期限的管道读取，详见 [Windows 操作和边界](docs/windows.md)。
 
 默认 Codex 路径为桌面应用捆绑的可执行文件：
 
@@ -28,7 +29,7 @@
 /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
 ```
 
-不同安装路径可通过 `--codex /absolute/path/to/codex` 指定。Windows、远程主机和云端 Work 尚未适配或验收。
+不同安装路径可通过 `--codex /absolute/path/to/codex` 指定。Windows 桌面自动回调、手机到达及声音需要单独验收；远程主机和云端 Work 尚未验收。
 
 ## 安装 Skill
 
@@ -38,7 +39,7 @@
 
 ## 启用完成通知
 
-准备一个只含 Bark 设备密钥的 UTF-8 文件，不能带换行。文件必须属于当前用户、权限为 `0600`，且不是符号链接或硬链接。密钥不应写入仓库、聊天、命令参数或日志。
+准备一个只含 Bark 设备密钥的 UTF-8 文件，不能带换行。文件必须属于当前用户，POSIX 权限为 `0600`，Windows DACL 仅允许当前用户访问，且不是符号链接或硬链接。密钥不应写入仓库、聊天、命令参数或日志。
 
 ```sh
 python3 ~/.codex/skills/bark-task-notify/scripts/manage.py enable \
@@ -48,6 +49,8 @@ python3 ~/.codex/skills/bark-task-notify/scripts/manage.py status
 ```
 
 配置默认使用 `~/.codex/config.toml`，运行目录为 `~/.local/share/bark-task-notify`。重新启用时可省略已保存的密钥文件引用。
+
+Windows 默认运行目录为 `%LOCALAPPDATA%\bark-task-notify`，使用 `python` 并明确传入当前桌面应用的 `--codex` 绝对路径。
 
 管理器保留已有的 `notify` 回调。目前只接受首行 JSON 兼容的单行 `notify` 数组；其他格式会报告限制，需先检查后调整。
 
@@ -85,6 +88,8 @@ python3 ~/.codex/skills/bark-task-notify/scripts/manage.py disable
 ```sh
 python3 -B -m unittest discover -s tests -p 'test_*.py'
 ```
+
+Windows 隔离测试使用 `python -B -m unittest discover -s tests -p test_windows_native.py -v`。原有 POSIX 测试依赖 `fcntl`，需在 POSIX 主机运行。
 
 - [设计说明](docs/design.md)
 - [验证记录与支持边界](docs/validation.md)

@@ -13,7 +13,7 @@ description: 管理 Codex 每轮回复结束和异步问题卡片出现时的 Ba
 
 - 每个符合条件的主聊天轮次最多发起一次推送。标题是 `socket.gethostname()`，正文是元数据中的聊天名称原文加 ` 已完成`，铃声为 `calypso`。
 - “已完成”表示这一轮回复结束。子代理、未知来源、读取不到名称的事件跳过。
-- 支持当前 Mac 上经过验证的本地 Codex 桌面通知入口，以及既有本地 Work 聊天通过工具继续回复的路径。Python 3.9+、POSIX 文件锁和可执行的 Codex app-server 是必需条件。Work 的本地与云端执行路径须分别验证，不能仅凭使用本机工具就宣称支持。Windows 尚未适配。
+- 支持当前 Mac 上经过验证的本地 Codex 桌面通知入口，以及既有本地 Work 聊天通过工具继续回复的路径。Windows 提供本机管理器和发送器，要求 Python 3.9+、NTFS 私有权限以及支持 app-server 的 Codex。Windows 代码测试不等同于桌面回调或手机验收。Work 的本地与云端执行路径须分别验证，不能仅凭使用本机工具就宣称支持。
 - 保留已有的 `notify` 回调并原样传递事件。只接受首行 JSON 兼容的单行 `notify` 数组；遇到其他配置格式先报告限制，不自动重写整份配置。
 
 ## 操作
@@ -27,11 +27,11 @@ python3 <skill>/scripts/manage.py disable --config <config.toml> --runtime <runt
 python3 <skill>/scripts/manage.py test --config <config.toml> --runtime <runtime> --codex <codex-executable> --thread-id <completed-thread-id> --turn-id <completed-turn-id>
 ```
 
-通常配置位于 `~/.codex/config.toml`，运行目录使用 `~/.local/share/bark-task-notify`。桌面环境优先使用该应用捆绑的 Codex 可执行文件，以减少版本差异。
+通常配置位于 `~/.codex/config.toml`，POSIX 运行目录使用 `~/.local/share/bark-task-notify`，Windows 使用 `%LOCALAPPDATA%\bark-task-notify`。Windows 命令使用 `python`；始终展开参数为真实绝对路径。桌面环境优先使用该应用捆绑的 Codex 可执行文件，以减少版本差异。Windows 默认只在 `%LOCALAPPDATA%\OpenAI\Codex\bin` 下发现唯一安全候选时选择 `codex.exe`；存在多个版本时明确传入 `--codex`。
 
 用户要求启用自动 Bark 通知时，可在已授权范围内完成安装和验证。`test` 会真实推送：只对用户授权测试、且已确认结束的事件使用它；不要编造事件 ID。先检查状态，避免重复测试已处理事件。
 
-密钥通过已有私有文件提供，配置仅保存文件路径。密钥文件须为当前用户所有的普通文件、无符号链接或硬链接、权限 `0600`；内容为无换行的 UTF-8 密钥。不要在聊天、命令参数或日志中输出密钥。没有可用文件时，让用户在本机私下配置，避免要求把密钥粘贴到聊天。
+密钥通过已有私有文件提供，配置仅保存文件路径。密钥文件须为当前用户所有的普通文件、无符号链接或硬链接；POSIX 权限为 `0600`，Windows DACL 仅允许当前用户访问，可继承私有父目录的等效权限。Windows 拒绝空 DACL、其他主体的允许 ACE、重解析路径、UNC、设备路径及备用数据流。内容为无换行的 UTF-8 密钥。不要在聊天、命令参数或日志中输出密钥。没有可用文件时，让用户在本机私下配置，避免要求把密钥粘贴到聊天。
 
 启用后检查状态和原回调保留情况。已运行的聊天可能仍使用此前加载的配置；用用户授权的新一轮聊天验证实际回调。不要为了加载配置自行重启桌面应用。
 
@@ -62,6 +62,8 @@ python3 <skill>/scripts/manage_questions.py disable --hooks <hooks.json> --runti
 ```
 
 默认 hook 文件是 `~/.codex/hooks.json`。管理器只增删自己拥有的定义，保留其他 hooks。若有同层 inline hooks 或其他配置冲突，先检查现状，不覆盖整个配置。
+
+Windows hook 提供 `commandWindows`，通过 PowerShell 编码命令和单引号参数调用 Python，保留标准输入。必须另外确认实际 Codex 版本的执行器支持此定义；命令隔离测试和管理器的 `configured` 状态不能证明原生 Hook 已受信任。
 
 - 接收 `PostToolUse` 的 `request_user_input_async` 成功结果，要求 `accepted` 为布尔 `true`。
 - 标题仍为主机名，正文为聊天名称原文加 ` 等待你回复`，铃声为 `alarm`。完成通知使用 `calypso`。

@@ -73,11 +73,15 @@ def open_state(runtime):
     import notify as base
     path = os.path.join(runtime, "questions.sqlite")
     base.no_links(path)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        base.check_private(os.fstat(fd))
-    finally:
+    if os.name == "nt":
+        fd, _ = base.native.open_fd(path, write=True, create=True)
         os.close(fd)
+    else:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            base.check_private(os.fstat(fd))
+        finally:
+            os.close(fd)
     db = sqlite3.connect(path, timeout=0.5)
     try:
         db.execute("CREATE TABLE IF NOT EXISTS questions (host_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
@@ -176,6 +180,12 @@ def worker(runtime, codex, thread_id, turn_id, call_id):
 def launch_worker(runtime, codex, identity):
     import subprocess
     import warnings
+    if os.name == "nt":
+        import windows_native
+        windows_native.detached_popen([sys.executable, "-B", os.path.abspath(__file__), "--worker", "--runtime", runtime,
+                                       "--codex", codex, "--thread-id", identity[0], "--turn-id", identity[1],
+                                       "--tool-use-id", identity[2]])
+        return
     # Detachment is intentional. Popen's discarded handle can otherwise emit a
     # ResourceWarning to the hook's stderr when the caller enables warnings.
     with warnings.catch_warnings():

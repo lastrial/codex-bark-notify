@@ -5,7 +5,6 @@ Only an existing first-line JSON-compatible notify array is supported. Config
 changes preserve unrelated bytes and recheck file identity before replacement.
 """
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -18,10 +17,17 @@ import tempfile
 import time
 import uuid
 
+if os.name == "nt":
+    import windows_native as native
+else:
+    import fcntl
+
 sys.dont_write_bytecode = True
-DEFAULT_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+DEFAULT_CODEX = native.default_codex() if os.name == "nt" else "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+DEFAULT_RUNTIME = (os.path.join(os.environ["LOCALAPPDATA"], "bark-task-notify") if os.name == "nt"
+                   else os.path.expanduser("~/.local/share/bark-task-notify"))
 MAX_CONFIG = 1024 * 1024
-FILES = ("notify.py", "read_thread_title.py", "manage.py")
+FILES = ("notify.py", "read_thread_title.py", "manage.py") + (("windows_native.py",) if os.name == "nt" else ())
 LOCK_BUDGET = 13.0
 STATES = {"processing", "sent", "rejected", "unknown", "skipped"}
 REASONS = {"claimed", "accepted", "http_rejected", "api_rejected", "transport_error", "http_unknown",
@@ -40,6 +46,8 @@ def fail(code):
 
 
 def no_links(path):
+    if os.name == "nt":
+        return native.no_links(path)
     current = os.path.abspath(path)
     while True:
         if os.path.islink(current):
@@ -51,6 +59,8 @@ def no_links(path):
 
 
 def read_regular(path, maximum=MAX_CONFIG, private=False):
+    if os.name == "nt":
+        return native.read_regular(path, maximum, private)
     no_links(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -67,6 +77,8 @@ def read_regular(path, maximum=MAX_CONFIG, private=False):
 
 
 def private_directory(path):
+    if os.name == "nt":
+        return native.private_directory(path)
     no_links(path)
     info = os.lstat(path)
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
@@ -97,6 +109,12 @@ def notify_array(argv):
 
 
 def executable(path):
+    if os.name == "nt":
+        no_links(path)
+        # Batch files may route through cmd.exe even with shell=False. Require
+        # a native executable; scripts can be arguments to a native interpreter.
+        if os.path.splitext(path)[1].lower() not in (".exe", ".com"):
+            fail("invalid_executable")
     if not os.path.isabs(path) or not os.path.isfile(path) or not os.access(path, os.X_OK):
         fail("invalid_executable")
 
@@ -106,6 +124,12 @@ def key_reference(path):
     if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
         fail("key_file_required")
     no_links(path)
+    if os.name == "nt":
+        handle, info = native.open_handle(path, private=True)
+        native.CloseHandle(handle)
+        if not 0 < info.st_size <= 512:
+            fail("unsafe_key_file")
+        return
     info = os.lstat(path)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or
             stat.S_IMODE(info.st_mode) != 0o600 or not 0 < info.st_size <= 512):
@@ -117,6 +141,8 @@ def digest(data):
 
 
 def create_file(path, data):
+    if os.name == "nt":
+        return native.create_file(path, data)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(fd, 0o600)
@@ -129,6 +155,8 @@ def create_file(path, data):
 
 
 def replace_checked(path, before, info, after, private=False):
+    if os.name == "nt":
+        return native.replace_checked(path, before, info, after, private)
     directory = os.path.dirname(path)
     fd, temporary = tempfile.mkstemp(prefix=".bark-task-notify-", dir=directory)
     try:
@@ -170,6 +198,15 @@ def set_active(runtime, active, name="activation.json"):
         fail("invalid_activation")
     path = os.path.join(runtime, name)
     data = (json.dumps({"enabled": active}, separators=(",", ":")) + "\n").encode("ascii")
+    if os.name == "nt":
+        try:
+            handle, info = native.open_handle(path)
+        except FileNotFoundError:
+            create_file(path, data)
+        else:
+            native.CloseHandle(handle)
+            native.replace_metadata(path, info, data)
+        return
     no_links(path)
     try:
         before = os.lstat(path)
@@ -271,10 +308,15 @@ def install_new(runtime, config, codex, python, original_line, original_argv, ke
         except (SyntaxError, ValueError):
             fail("source_invalid")
         sources[name] = data
-    os.makedirs(os.path.dirname(runtime), mode=0o700, exist_ok=True)
+    if os.name == "nt":
+        native.makedirs(os.path.dirname(runtime))
+        native.mkdir(runtime)
+    else:
+        os.makedirs(os.path.dirname(runtime), mode=0o700, exist_ok=True)
     no_links(runtime)
-    os.mkdir(runtime, 0o700)
-    os.chmod(runtime, 0o700)
+    if os.name != "nt":
+        os.mkdir(runtime, 0o700)
+        os.chmod(runtime, 0o700)
     host_id = str(uuid.uuid4())
     value = {"version": 1, "runtime": runtime, "config": config, "codex": codex, "python": python,
              "original_line": original_line,
@@ -292,6 +334,15 @@ def install_new(runtime, config, codex, python, original_line, original_argv, ke
 
 
 def lock_file(path, deadline):
+    if os.name == "nt":
+        fd, _info = native.open_fd(path, write=True, create=True)
+        try:
+            if not native.lock_until(fd, True, deadline):
+                fail("lock_timeout")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
     no_links(path)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -343,6 +394,10 @@ def state_summary(runtime):
 
 
 def _check_state_file(path):
+    if os.name == "nt":
+        handle, _info = native.open_handle(path, private=True)
+        native.CloseHandle(handle)
+        return
     no_links(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -447,7 +502,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("enable", "disable", "status", "test"))
     parser.add_argument("--config", default=os.path.expanduser("~/.codex/config.toml"))
-    parser.add_argument("--runtime", default=os.path.expanduser("~/.local/share/bark-task-notify"))
+    parser.add_argument("--runtime", default=DEFAULT_RUNTIME)
     parser.add_argument("--codex", default=DEFAULT_CODEX)
     parser.add_argument("--key-file")
     parser.add_argument("--thread-id")

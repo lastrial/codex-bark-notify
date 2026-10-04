@@ -2,7 +2,7 @@
 """Read one existing Codex thread's display name through app-server stdio.
 
 Only initialize and thread/read are sent. No turns are requested, resumed or
-started. Raw server payloads and stderr are never printed. This POSIX prototype
+started. Raw server payloads and stderr are never printed. This local probe
 uses the caller's Codex home and disables hooks only for its child invocation.
 """
 
@@ -16,6 +16,9 @@ import subprocess
 import sys
 import time
 import uuid
+
+if os.name == "nt":
+    import windows_native as native
 
 
 MAX_LINE_BYTES = 128 * 1024
@@ -33,11 +36,14 @@ class RpcReader:
         self.deadline = deadline
         self.buffer = bytearray()
         self.total = 0
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(stream, selectors.EVENT_READ)
+        self.selector = None
+        if os.name != "nt":
+            self.selector = selectors.DefaultSelector()
+            self.selector.register(stream, selectors.EVENT_READ)
 
     def close(self):
-        self.selector.close()
+        if self.selector:
+            self.selector.close()
 
     def response(self, request_id):
         while True:
@@ -70,9 +76,15 @@ class RpcReader:
                 return message["result"]
             if len(self.buffer) > MAX_LINE_BYTES:
                 raise ProbeError("response_too_large")
-            if not self.selector.select(remaining):
-                raise ProbeError("timeout")
-            chunk = os.read(self.stream.fileno(), 16384)
+            if os.name == "nt":
+                try:
+                    chunk = native.pipe_read(self.stream, 16384, self.deadline)
+                except TimeoutError:
+                    raise ProbeError("timeout") from None
+            else:
+                if not self.selector.select(remaining):
+                    raise ProbeError("timeout")
+                chunk = os.read(self.stream.fileno(), 16384)
             if not chunk:
                 raise ProbeError("server_closed")
             self.total += len(chunk)
@@ -90,6 +102,12 @@ def send(proc, message):
 
 def stop(proc):
     """Terminate the isolated process group, including surviving children."""
+    if os.name == "nt":
+        try:
+            native.stop_child(proc)
+        except subprocess.TimeoutExpired:
+            raise ProbeError("cleanup_failed") from None
+        return
     if proc.stdin:
         proc.stdin.close()
     try:
@@ -115,6 +133,8 @@ def stop(proc):
 
 
 def _read_thread(codex, thread_id, timeout):
+    if os.name == "nt":
+        return _windows_read_thread(codex, thread_id, timeout)
     if os.name != "posix":
         raise ProbeError("unsupported_platform")
     deadline = time.monotonic() + timeout
@@ -164,6 +184,31 @@ def _read_thread(codex, thread_id, timeout):
                 stop(proc)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _windows_read_thread(codex, thread_id, timeout):
+    deadline = time.monotonic() + timeout
+    proc = reader = None
+    try:
+        proc = native.bounded_popen([codex, "app-server", "--listen", "stdio://", "-c",
+                                     "features.hooks=false", "-c", "analytics.enabled=false"])
+        reader = RpcReader(proc.stdout, deadline)
+        send(proc, {"id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "bark-title-probe", "version": "1"}, "capabilities": {}}})
+        reader.response(1)
+        send(proc, {"method": "initialized", "params": {}})
+        send(proc, {"id": 2, "method": "thread/read", "params": {"threadId": thread_id, "includeTurns": False}})
+        thread = reader.response(2).get("thread")
+        if not isinstance(thread, dict) or thread.get("id") != thread_id:
+            raise ProbeError("thread_id_mismatch")
+        if thread.get("turns") not in (None, []):
+            raise ProbeError("unexpected_turns")
+        return thread
+    finally:
+        if reader:
+            reader.close()
+        if proc:
+            stop(proc)
 
 
 def read_completion_metadata(codex, thread_id, timeout):

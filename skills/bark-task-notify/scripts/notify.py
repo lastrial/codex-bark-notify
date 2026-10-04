@@ -7,6 +7,9 @@ SQLite retain only identities, fixed states, reasons and times.
 import os
 import sys
 
+if os.name == "nt":
+    import windows_native as native
+
 sys.dont_write_bytecode = True
 MAX_PAYLOAD_BYTES = 64 * 1024
 MAX_NAME_BYTES = 4096
@@ -50,6 +53,8 @@ def event_identity(raw):
 
 
 def no_links(path):
+    if os.name == "nt":
+        return native.no_links(path)
     current = os.path.abspath(path)
     while True:
         if os.path.islink(current):
@@ -61,6 +66,8 @@ def no_links(path):
 
 
 def private_runtime(path):
+    if os.name == "nt":
+        return native.private_directory(path)
     import stat
     no_links(path)
     info = os.lstat(path)
@@ -77,6 +84,8 @@ def check_private(info):
 
 
 def read_private(path, maximum):
+    if os.name == "nt":
+        return native.read_regular(path, maximum, private=True)[0]
     no_links(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -129,6 +138,8 @@ def classify(metadata):
 
 def open_gate(runtime):
     path = os.path.join(runtime, "delivery.lock")
+    if os.name == "nt":
+        return native.open_fd(path, write=True, create=True)[0]
     no_links(path)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -140,6 +151,8 @@ def open_gate(runtime):
 
 
 def lock_until(fd, exclusive, deadline):
+    if os.name == "nt":
+        return native.lock_until(fd, exclusive, deadline)
     import fcntl
     import time
     while True:
@@ -155,12 +168,21 @@ def lock_until(fd, exclusive, deadline):
 def open_state(runtime, timeout=0.5):
     import sqlite3
     path = os.path.join(runtime, "state.sqlite")
+    if os.name == "nt":
+        fd, _ = native.open_fd(path, write=True, create=True)
+        os.close(fd)
+        return _initialize_state(path, timeout)
     no_links(path)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         check_private(os.fstat(fd))
     finally:
         os.close(fd)
+    return _initialize_state(path, timeout)
+
+
+def _initialize_state(path, timeout):
+    import sqlite3
     db = sqlite3.connect(path, timeout=timeout)
     try:
         db.execute("CREATE TABLE IF NOT EXISTS events (host_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
@@ -253,6 +275,8 @@ def http_send(key_file, payload, timeout):
 
 
 def stop_child(proc):
+    if os.name == "nt":
+        return native.stop_child(proc)
     import signal
     import subprocess
     # Kill the group even if its leader has exited, so descendants cannot linger.
@@ -284,6 +308,8 @@ def network_child(key_file, payload, deadline):
     import time
     if not http_payload_valid(payload):
         return {"state": "unknown", "reason": "network_child_error"}
+    if os.name == "nt":
+        return _windows_network_child(key_file, payload, deadline)
     remaining = deadline - time.monotonic() - FINAL_MARGIN
     if remaining <= 0:
         return {"state": "unknown", "reason": "deadline"}
@@ -320,6 +346,45 @@ def network_child(key_file, payload, deadline):
                 stop_child(proc)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def _windows_network_child(key_file, payload, deadline):
+    import json
+    import subprocess
+    import time
+    proc = None
+    remaining = deadline - time.monotonic() - FINAL_MARGIN
+    if remaining <= 0:
+        return {"state": "unknown", "reason": "deadline"}
+    try:
+        proc = native.bounded_popen([sys.executable, "-B", os.path.abspath(__file__), "--http", "--key-file",
+                                     key_file, "--timeout", str(remaining)])
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(raw) > MAX_HTTP_BYTES:
+            return {"state": "unknown", "reason": "network_child_error"}
+        proc.stdin.write(raw)
+        proc.stdin.close()
+        output = bytearray()
+        while True:
+            chunk = native.pipe_read(proc.stdout, 513 - len(output), deadline - FINAL_MARGIN)
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > 512:
+                return {"state": "unknown", "reason": "network_child_error"}
+        proc.wait(timeout=max(0.001, deadline - time.monotonic() - FINAL_MARGIN))
+        value = json.loads(output)
+        if (proc.returncode or not isinstance(value, dict) or set(value) != {"state", "reason"} or
+                value["state"] not in {"sent", "rejected", "unknown"} or value["reason"] not in REASONS):
+            return {"state": "unknown", "reason": "network_child_error"}
+        return value
+    except (TimeoutError, subprocess.TimeoutExpired):
+        return {"state": "unknown", "reason": "deadline"}
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return {"state": "unknown", "reason": "network_child_error"}
+    finally:
+        if proc:
+            native.stop_child(proc)
 
 
 def worker(runtime, codex, thread_id, turn_id):
@@ -389,6 +454,10 @@ def launch_worker(runtime, codex, raw):
     import subprocess
     ids = event_identity(raw)
     if ids:
+        if os.name == "nt":
+            native.detached_popen([sys.executable, "-B", os.path.abspath(__file__), "--worker", "--runtime", runtime,
+                                  "--codex", codex, "--thread-id", ids[0], "--turn-id", ids[1]])
+            return
         subprocess.Popen([sys.executable, "-B", os.path.abspath(__file__), "--worker", "--runtime", runtime,
                           "--codex", codex, "--thread-id", ids[0], "--turn-id", ids[1]],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -405,6 +474,9 @@ def forward(argv):
     except BaseException:
         pass
     finally:
+        if os.name == "nt":
+            import subprocess
+            return subprocess.call(original + [raw], shell=False)
         try:
             import signal
             # Match subprocess restore_signals: Python ignores these signals,

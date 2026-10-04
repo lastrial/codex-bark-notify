@@ -38,8 +38,16 @@ def completion_install(runtime, codex):
 
 
 def owned_entry(runtime, codex, python):
-    command = shlex.join([python, "-B", os.path.join(runtime, "question.py"), "--hook",
-                          "--runtime", runtime, "--codex", codex])
+    argv = [python, "-B", os.path.join(runtime, "question.py"), "--hook", "--runtime", runtime, "--codex", codex]
+    if os.name == "nt":
+        import base64
+        # Encode a PowerShell call with single-quoted argv. The outer hook shell
+        # sees no path metacharacters; stdin and the payload exit status survive.
+        ps = "& " + " ".join("'" + item.replace("'", "''") + "'" for item in argv) + "; exit $LASTEXITCODE"
+        command = "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+        return {"matcher": "^request_user_input_async$", "hooks": [
+            {"type": "command", "command": command, "commandWindows": command, "timeout": 3}]}
+    command = shlex.join(argv)
     return {"matcher": "^request_user_input_async$", "hooks": [{"type": "command", "command": command, "timeout": 3}]}
 
 
@@ -104,6 +112,16 @@ def references_owned(group, runtime):
         command = hook.get("command") if isinstance(hook, dict) else None
         if isinstance(command, str) and script in command:
             return True
+        if os.name == "nt" and isinstance(hook, dict):
+            import base64
+            for command in (hook.get("command"), hook.get("commandWindows")):
+                if isinstance(command, str) and " -EncodedCommand " in command:
+                    try:
+                        decoded = base64.b64decode(command.split(" -EncodedCommand ", 1)[1], validate=True).decode("utf-16-le")
+                    except (ValueError, UnicodeError):
+                        continue
+                    if script.replace("'", "''") in decoded:
+                        return True
     return False
 
 
@@ -119,6 +137,9 @@ def write_hooks(path, document, raw, info):
     if raw is None:
         # O_EXCL rechecks absence instead of overwriting a concurrently created file.
         completion.create_file(path, data)
+        if os.name == "nt":
+            completion.native.sync_directory(os.path.dirname(path))
+            return
         directory_fd = os.open(os.path.dirname(path), os.O_RDONLY)
         try:
             os.fsync(directory_fd)
@@ -271,7 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("enable", "disable", "status"))
     parser.add_argument("--hooks", default=os.path.expanduser("~/.codex/hooks.json"))
-    parser.add_argument("--runtime", default=os.path.expanduser("~/.local/share/bark-task-notify"))
+    parser.add_argument("--runtime", default=completion.DEFAULT_RUNTIME)
     parser.add_argument("--codex", default=completion.DEFAULT_CODEX)
     args = parser.parse_args()
     try:
